@@ -1,0 +1,54 @@
+services:
+  backend:
+    build: .
+    container_name: butler_backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./app:/app/app
+    depends_on:
+      db:
+        condition: service_healthy # 👈 关键改动：必须等 db 健康了才启动
+      chromadb:
+        condition: service_started
+    environment:
+      - DB_HOST=db
+      - DB_USER=root
+      - DB_PASSWORD=rootpassword
+      - DB_NAME=family_butler
+      - CHROMA_HOST=chromadb
+      - CHROMA_PORT=8000
+      # 确保 URL 正确，使用 pymysql 驱动
+      - DATABASE_URL=mysql+pymysql://root:rootpassword@db/family_butler
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  db:
+    image: mysql:8.0
+    container_name: butler_db
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_DATABASE: family_butler
+    ports:
+      - "3306:3306"
+    volumes:
+      - db_data:/var/lib/mysql
+    # 👇 新增部分：健康检查
+    healthcheck:
+      test: [ "CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-prootpassword" ]
+      interval: 5s # 每5秒检查一次
+      timeout: 5s # 超时时间
+      retries: 10 # 最多试10次
+      start_period: 10s # 启动后给10秒缓冲期
+
+  chromadb:
+    image: chromadb/chroma:latest
+    container_name: butler_chromadb
+    ports:
+      - "8001:8000"
+    volumes:
+      - chroma_data:/chroma/chroma
+
+volumes:
+  db_data:
+  chroma_data:

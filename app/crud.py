@@ -75,3 +75,29 @@ def create_item_with_inventory(
     db.commit()
     db.refresh(db_inventory)
     return db_inventory
+
+
+# app/crud.py (追加)
+
+
+def get_or_create_location_by_name(db: Session, name: str, user_id: int = 1):
+    """
+    根据名字找位置 ID，找不到就自动新建
+    """
+    # 1. 尝试查找
+    loc = (
+        db.query(models.Location)
+        .filter(models.Location.name == name, models.Location.user_id == user_id)
+        .first()
+    )
+
+    # 2. 找到直接返回
+    if loc:
+        return loc
+
+    # 3. 没找到，自动创建
+    new_loc = models.Location(name=name, user_id=user_id)
+    db.add(new_loc)
+    db.commit()
+    db.refresh(new_loc)
+    return new_loc

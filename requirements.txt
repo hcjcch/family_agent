@@ -5,3 +5,7 @@ pymysql
 mem0ai
 chromadb
 cryptography
+
+mem0ai
+chromadb
+sentence-transformers  # 用于本地加载中文模型

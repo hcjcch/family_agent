@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 from typing import List
 from . import models, database, schemas, crud
 from datetime import datetime
+import app.tools
 
 # app/main.py
 from fastapi.middleware.cors import CORSMiddleware
@@ -411,64 +412,86 @@ class ChatInput(BaseModel):
     message: str
 
 
-# app/main.py
+from app.core.tool_registry import registry
+from app.services.llm_service import chat as llm_engine
+import json
+
+SYSTEM_PROMPT = """
+你是一个贴心、幽默、高效的 AI 家庭管家。
+你的职责是管理家庭库存、记忆物品位置，并像真人管家一样与用户对话。
+
+【工具使用规则】
+1. 根据用户意图，自主选择工具。
+2. **多任务处理**：如果用户一句话包含多个动作（例如"买了A放B，又买了C放D"），**必须在一次响应中生成多个 Tool Call**。
+3. **禁止废话**：在决定调用工具时，**不要生成任何普通的回复文本**。只输出 Tool Calls。等待工具执行完毕后，你再根据结果生成自然语言回复。
+
+【关于回答风格】
+当工具返回数据后，请遵守以下规则：
+1. **说人话**：将 JSON 数据转化为自然的口语，不要出现 JSON 格式或 Key-Value 对。
+2. **隐藏技术细节**：不要提及 ID、UUID、数据库字段名等技术术语。
+3. **语气亲切**：如果库存充足，可以让人放心；如果没了，提醒补货。
+4. **简洁明了**：直接回答核心问题，不要废话。
+
+例如：
+- ❌ 错误：根据数据库返回，Inventory item=apple quantity=5 location_id=2。
+- ✅ 正确：我查到了，冰箱里还有 5 个苹果。
+"""
 
 
 @app.post("/chat")
-def chat_with_butler(chat: ChatInput, db: Session = Depends(database.get_db)):
-    user_text = chat.message
-    print(f"收到对话: {user_text}")
+def chat_agent(chat: ChatInput, db: Session = Depends(database.get_db)):
+    """
+    [Agent 模式] 这里的代码现在完全不知道 OpenAI 的存在
+    """
+    user_msg = chat.message
+    print(f"👤 用户: {user_msg}")
 
-    # 1. 意图识别
-    intent = llm_service.classify_intent(user_text)
-    print(f"🧠 识别意图: {intent}")
+    # 构造上下文
+    context = {"db": db, "user_id": 1}
 
-    system_data = None
-    reply_text = ""
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": user_msg},
+    ]
 
-    # 2. 路由分发
-    if intent == "CHAT":
-        # --- 闲聊模式 ---
-        # 直接让 LLM 回复，不查数据库
-        system_data = {"status": "chatting"}
-        # 这里的 generate_natural_response 内部会处理 CHAT 类型，或者直接在这里生成
+    # 获取工具 Schema
+    available_tools = registry.get_schemas()
 
-    elif intent == "QUERY":
-        # --- 查询模式 ---
-        search_result = search_smart_memory(query=user_text, db=db)
-        system_data = search_result["results"]
+    print(f"🤖 可用工具: {[tool['function']['name'] for tool in available_tools]}")
 
-    elif intent == "ADD":
-        # --- 录入模式 ---
-        # 复用 auto_add 逻辑
-        add_result = auto_add_memory(input=OnlyTextInput(text=user_text), db=db)
-        system_data = add_result
+    # --- 1. 第一次思考 (调用封装好的 LLM) ---
+    # 以前: client.chat.completions.create(...)
+    # 现在: llm_engine.chat(...)
+    ai_msg = llm_engine(messages=messages, tools=available_tools)
 
-    elif intent == "USE":
-        # --- 消耗模式 (核心升级点) ---
-        # 1. 先提取物品信息
-        extracted = llm_service.extract_item_info(user_text)
-        if extracted and extracted.get("name"):
-            # 2. 调用消耗逻辑 (假设您在 crud.py 里写了 reduce_inventory)
-            # 如果还没写，这里可以先当作普通记录，或者标记为负数
+    # --- 2. 判断是否命中工具 ---
+    if ai_msg.tool_calls:
+        # 把 AI 的思考过程加进历史
+        messages.append(ai_msg)
 
-            # 这是一个临时演示，真正实现需要调用 crud.reduce_inventory
-            # reduce_result = crud.reduce_inventory(db, extracted["name"], extracted.get("quantity", 1))
+        for tool_call in ai_msg.tool_calls:
+            func_name = tool_call.function.name
+            args = json.loads(tool_call.function.arguments)
 
-            # 暂时先只存入 Mem0 作为行为日志
-            m.add(
-                f"[消耗记录] {user_text}",
-                user_id="user_1",
-                metadata={"type": "consumption"},
+            print(f"🤖 动态调用工具: {func_name}, args: {args}")
+
+            # 执行工具
+            tool_result = registry.execute(func_name, args, context)
+
+            # 填入结果
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": json.dumps(tool_result, ensure_ascii=False, default=str),
+                }
             )
-            system_data = {"action": "consumed", "item": extracted["name"]}
-        else:
-            system_data = {"error": "没听懂消耗了什么"}
 
-    # 3. 生成回复
-    # 注意：需要去 llm_service.py 更新 generate_natural_response 以支持 CHAT 和 USE 的提示词
-    reply = llm_service.generate_natural_response(
-        user_text=user_text, action_type=intent, data=system_data
-    )
+        # --- 3. 第二次思考 (生成人话) ---
+        # 再次调用封装工具，这次不需要传 tools 了（通常生成最终回复时不需要）
+        final_msg = llm_engine(messages=messages)
+        return {"reply": final_msg.content}
 
-    return {"reply": reply, "data": system_data, "intent": intent}
+    else:
+        # 纯闲聊
+        return {"reply": ai_msg.content}

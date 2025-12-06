@@ -176,3 +176,37 @@ def get_item_all_inventories(db: Session, item_id: int):
     )  # ✅ 改为 .all()，获取所有记录
 
     return results
+
+
+def get_all_inventory_details(db: Session):
+    """
+    [报表] 获取所有库存明细
+    """
+    # 联表查询: Item + Inventory + Location
+    results = (
+        db.query(
+            models.Item.name,
+            models.Item.category,
+            models.Inventory.quantity,
+            models.Inventory.unit,
+            models.Location.name.label("location_name"),
+        )
+        .join(models.Inventory, models.Inventory.item_id == models.Item.id)
+        .join(models.Location, models.Inventory.location_id == models.Location.id)
+        .order_by(models.Item.category, models.Item.name)  # 按分类和名字排序，好看点
+        .all()
+    )
+
+    # 转成字典列表
+    data = []
+    for row in results:
+        data.append(
+            {
+                "item": row.name,
+                "cat": row.category or "杂项",
+                "qty": float(row.quantity),
+                "unit": row.unit,
+                "loc": row.location_name,
+            }
+        )
+    return data

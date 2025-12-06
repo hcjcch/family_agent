@@ -2,6 +2,7 @@
 import os
 import json
 from openai import OpenAI
+from typing import List, Optional, Any, Dict
 
 # 使用环境变量配置
 client = OpenAI(
@@ -112,3 +113,35 @@ def generate_natural_response(user_text: str, action_type: str, data: any):
         return response.choices[0].message.content
     except:
         return "好的，处理完了。"
+
+
+def chat(messages: List[Dict[str, str]], tools: Optional[List[Dict]] = None) -> Any:
+    """
+    统一的对话接口
+    :param messages: 对话历史 [{"role": "user", "content": "..."}]
+    :param tools: 工具定义 (JSON Schema 列表)
+    :return: LLM 的响应消息对象 (包含 content 和 tool_calls)
+    """
+    try:
+        # 构造参数字典
+        params = {
+            "model": "deepseek-chat",
+            "messages": messages,
+            "temperature": 0.1,  # 保持冷静，利于工具调用
+        }
+
+        # 只有当传入工具时，才添加 tools 参数
+        if tools:
+            params["tools"] = tools
+            params["tool_choice"] = "auto"
+
+        # 调用大模型
+        response = client.chat.completions.create(**params)
+
+        # 返回 message 对象 (包含 content, tool_calls 等)
+        return response.choices[0].message
+
+    except Exception as e:
+        print(f"❌ LLM 调用失败: {str(e)}")
+        # 可以在这里做重试逻辑，或者抛出自定义异常
+        raise e

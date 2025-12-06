@@ -104,49 +104,77 @@ class OnlyTextInput(BaseModel):
 
 @app.post("/memories/auto_add")
 def auto_add_memory(input: OnlyTextInput, db: Session = Depends(database.get_db)):
-    # 1. 让 LLM 提取信息
+    """
+    [升级版] 智能录入：
+    - 如果能识别物品 -> 存库存 (MySQL) + 存记忆 (Mem0)
+    - 如果不能识别 -> 只存记忆 (Mem0)
+    """
+    print(f"收到录入请求: {input.text}")
+
+    # 1. 尝试让 LLM 提取信息
     extracted_json = llm_service.extract_item_info(input.text)
+    print(f"LLM 提取结果: {extracted_json}")
 
-    if not extracted_json or not extracted_json.get("name"):
-        return {"status": "error", "message": "无法识别物品信息，请再说详细点"}
+    # 准备 Mem0 需要的 Metadata
+    metadata = {"pure_text": input.text, "timestamp": str(datetime.now())}
 
-    # 2. 处理位置 (String -> ID)
-    loc_name = extracted_json.get("location") or "未分类区域"
-    location_obj = crud.get_or_create_location_by_name(db, loc_name)
+    # 返回给前端的信息
+    response_data = {
+        "status": "success",
+        "mode": "memory_only",  # 默认为纯记忆模式
+        "ai_extraction": extracted_json,
+    }
 
-    # 3. 构造 ItemCreate 对象
-    item_data = schemas.ItemCreate(
-        name=extracted_json["name"],
-        category=extracted_json.get("category"),
-        quantity=extracted_json.get("quantity", 1),
-        unit=extracted_json.get("unit", "个"),
-        location_id=location_obj.id,  # 填入刚才获取的 ID
-        image_url=None,
-    )
+    # --- 分支判断 ---
 
-    # 4. 写入 MySQL (事实大脑)
-    inventory_rec = crud.create_item_with_inventory(db, item_data)
+    # 判断标准：LLM 提取出了 JSON，并且里面有有效的 'name'
+    if extracted_json and extracted_json.get("name"):
+        # === 进入 [库存模式] ===
+        response_data["mode"] = "inventory_mode"
 
-    # 5. 写入 Mem0 (联想大脑)
-    # 关联 item_id
+        # A1. 处理位置
+        loc_name = extracted_json.get("location") or "未分类区域"
+        location_obj = crud.get_or_create_location_by_name(db, loc_name)
+
+        # A2. 写入 MySQL
+        # (注意：如果您还没做 Decimal 修复，这里要小心 float)
+        try:
+            item_data = schemas.ItemCreate(
+                name=extracted_json["name"],
+                category=extracted_json.get("category"),
+                quantity=extracted_json.get("quantity", 1),
+                unit=extracted_json.get("unit", "个"),
+                location_id=location_obj.id,
+                image_url=None,  # 未来这里可以接图片URL
+            )
+            inventory_rec = crud.create_item_with_inventory(db, item_data)
+
+            # A3. 关键步骤：把生成的 item_id 放进 Metadata
+            metadata["item_id"] = inventory_rec.item_id
+
+            response_data["db_record"] = {
+                "item": inventory_rec.item.name,
+                "location": location_obj.name,
+                "quantity": inventory_rec.quantity,
+            }
+        except Exception as e:
+            print(f"⚠️ 写入库存失败，降级为纯记忆存储: {e}")
+            # 如果数据库写入失败，不应该报错给用户，而是降级存入 Mem0
+            response_data["warning"] = f"库存写入失败: {str(e)}"
+
+    else:
+        # === 进入 [纯记忆模式] ===
+        print("未识别出具体物品，仅作为笔记存储")
+        metadata["type"] = "note"  # 标记为笔记类型
+
+    # --- 统一写入 Mem0 ---
+    # 无论是否提取出物品，这句话本身都是有价值的记忆
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     memory_text = f"[{current_time}] {input.text}"
-    metadata = {
-        "item_id": inventory_rec.item_id,
-        "pure_text": input.text,  # 存一份纯净文本，备用
-    }
-    print(f"正在写入 Mem0: {memory_text}")
+
     m.add(memory_text, user_id="user_1", metadata=metadata)
 
-    return {
-        "status": "success",
-        "ai_extraction": extracted_json,
-        "db_record": {
-            "item": inventory_rec.item.name,
-            "location": location_obj.name,
-            "quantity": inventory_rec.quantity,
-        },
-    }
+    return response_data
 
 
 # app/main.py -> search_smart_memory
@@ -158,8 +186,8 @@ def search_smart_memory(query: str, db: Session = Depends(database.get_db)):
     memories = m.search(query, user_id="user_1", limit=5)
 
     # 调试输出
-    print(f"🔍 DEBUG - Mem0 search 返回类型: {type(memories)}")
-    print(f"🔍 DEBUG - Mem0 search 返回内容: {memories}")
+    print(f"🔍 DEBUG - Mem0 search {query} 返回类型: {type(memories)}")
+    print(f"🔍 DEBUG - Mem0 search {query} 返回内容: {memories}")
 
     # 2. 提取所有相关的 item_id，并去重
     # 我们只关心搜到了哪些"物品"，不关心具体是哪条"记忆"触发的
@@ -374,3 +402,73 @@ def dump_memories():
 
         traceback.print_exc()  # 打印完整报错堆栈到终端
         return {"error": f"无法获取记忆: {str(e)}"}
+
+
+# app/main.py
+
+
+class ChatInput(BaseModel):
+    message: str
+
+
+# app/main.py
+
+
+@app.post("/chat")
+def chat_with_butler(chat: ChatInput, db: Session = Depends(database.get_db)):
+    user_text = chat.message
+    print(f"收到对话: {user_text}")
+
+    # 1. 意图识别
+    intent = llm_service.classify_intent(user_text)
+    print(f"🧠 识别意图: {intent}")
+
+    system_data = None
+    reply_text = ""
+
+    # 2. 路由分发
+    if intent == "CHAT":
+        # --- 闲聊模式 ---
+        # 直接让 LLM 回复，不查数据库
+        system_data = {"status": "chatting"}
+        # 这里的 generate_natural_response 内部会处理 CHAT 类型，或者直接在这里生成
+
+    elif intent == "QUERY":
+        # --- 查询模式 ---
+        search_result = search_smart_memory(query=user_text, db=db)
+        system_data = search_result["results"]
+
+    elif intent == "ADD":
+        # --- 录入模式 ---
+        # 复用 auto_add 逻辑
+        add_result = auto_add_memory(input=OnlyTextInput(text=user_text), db=db)
+        system_data = add_result
+
+    elif intent == "USE":
+        # --- 消耗模式 (核心升级点) ---
+        # 1. 先提取物品信息
+        extracted = llm_service.extract_item_info(user_text)
+        if extracted and extracted.get("name"):
+            # 2. 调用消耗逻辑 (假设您在 crud.py 里写了 reduce_inventory)
+            # 如果还没写，这里可以先当作普通记录，或者标记为负数
+
+            # 这是一个临时演示，真正实现需要调用 crud.reduce_inventory
+            # reduce_result = crud.reduce_inventory(db, extracted["name"], extracted.get("quantity", 1))
+
+            # 暂时先只存入 Mem0 作为行为日志
+            m.add(
+                f"[消耗记录] {user_text}",
+                user_id="user_1",
+                metadata={"type": "consumption"},
+            )
+            system_data = {"action": "consumed", "item": extracted["name"]}
+        else:
+            system_data = {"error": "没听懂消耗了什么"}
+
+    # 3. 生成回复
+    # 注意：需要去 llm_service.py 更新 generate_natural_response 以支持 CHAT 和 USE 的提示词
+    reply = llm_service.generate_natural_response(
+        user_text=user_text, action_type=intent, data=system_data
+    )
+
+    return {"reply": reply, "data": system_data, "intent": intent}

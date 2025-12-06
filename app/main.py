@@ -3,10 +3,23 @@ from fastapi import FastAPI, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import List
 from . import models, database, schemas, crud
+from datetime import datetime
+
+# app/main.py
+from fastapi.middleware.cors import CORSMiddleware
 
 models.Base.metadata.create_all(bind=database.engine)
 
 app = FastAPI(title="AI Family Butler")
+
+# 👇 新增：允许所有来源访问 (开发环境方便)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # 允许任何来源
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.get("/")
@@ -28,6 +41,14 @@ def read_locations(
 ):
     locations = crud.get_locations(db, skip=skip, limit=limit)
     return locations
+
+
+@app.get("/locations/tree", response_model=List[schemas.LocationNode])
+def get_locations_tree(db: Session = Depends(database.get_db)):
+    """
+    获取树状的位置结构，适合前端级联选择器使用
+    """
+    return crud.get_location_tree(db)
 
 
 # --- Item APIs (录入) ---
@@ -108,7 +129,14 @@ def auto_add_memory(input: OnlyTextInput, db: Session = Depends(database.get_db)
 
     # 5. 写入 Mem0 (联想大脑)
     # 关联 item_id
-    m.add(input.text, user_id="user_1", metadata={"item_id": inventory_rec.item_id})
+    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    memory_text = f"[{current_time}] {input.text}"
+    metadata = {
+        "item_id": inventory_rec.item_id,
+        "pure_text": input.text,  # 存一份纯净文本，备用
+    }
+    print(f"正在写入 Mem0: {memory_text}")
+    m.add(memory_text, user_id="user_1", metadata=metadata)
 
     return {
         "status": "success",
@@ -119,3 +147,230 @@ def auto_add_memory(input: OnlyTextInput, db: Session = Depends(database.get_db)
             "quantity": inventory_rec.quantity,
         },
     }
+
+
+# app/main.py -> search_smart_memory
+
+
+@app.get("/memories/search_smart")
+def search_smart_memory(query: str, db: Session = Depends(database.get_db)):
+    # 1. 问 Mem0
+    memories = m.search(query, user_id="user_1", limit=5)
+
+    # 调试输出
+    print(f"🔍 DEBUG - Mem0 search 返回类型: {type(memories)}")
+    print(f"🔍 DEBUG - Mem0 search 返回内容: {memories}")
+
+    # 2. 提取所有相关的 item_id，并去重
+    # 我们只关心搜到了哪些"物品"，不关心具体是哪条"记忆"触发的
+    found_item_ids = set()
+
+    # 检查 memories 的结构
+    if isinstance(memories, dict):
+        # 如果返回的是字典，检查是否有 results 键
+        if "results" in memories:
+            memory_list = memories["results"]
+        else:
+            memory_list = [memories]
+    elif isinstance(memories, list):
+        memory_list = memories
+    else:
+        memory_list = []
+
+    for mem in memory_list:
+        print(f"🔍 DEBUG - 处理记忆项: {mem}")
+        if isinstance(mem, dict):
+            meta = mem.get("metadata", {})
+            print(f"🔍 DEBUG - 元数据: {meta}")
+            if meta and "item_id" in meta:
+                found_item_ids.add(meta["item_id"])
+                print(f"🔍 DEBUG - 找到 item_id: {meta['item_id']}")
+
+    print(f"🔍 搜索 '{query}' 关联到的物品IDs: {found_item_ids}")
+
+    final_results = []
+
+    # 3. 遍历每个找到的物品，查它的全量库存
+    for item_id in found_item_ids:
+        # 先查物品基本信息 (名字)
+        item_obj = db.query(models.Item).filter(models.Item.id == item_id).first()
+        if not item_obj:
+            continue
+
+        # 再查它在所有位置的分布
+        inv_list = crud.get_item_all_inventories(db, item_id)
+
+        # 构造聚合后的结果
+        # 格式： 苹果 -> [冰箱: 5个, 厨房: 3个]
+        locations_detail = []
+        total_qty = 0
+
+        for inv in inv_list:
+            qty = float(inv.quantity)
+            total_qty += qty
+            locations_detail.append(
+                {"location": inv.location_name, "quantity": qty, "unit": inv.unit}
+            )
+
+        final_results.append(
+            {
+                "item_name": item_obj.name,
+                "total_quantity": total_qty,
+                "locations": locations_detail,  # 这是一个列表
+                "match_score": 0.9,  # 这里可以简化，或者取 Mem0 的最高分
+            }
+        )
+
+    return {"results": final_results}
+
+
+# --- 🛠️ 调试工具接口 ---
+
+
+@app.get("/debug/dump")
+def dump_database(db: Session = Depends(database.get_db)):
+    """
+    上帝视角：一次性打印出 MySQL 中所有表的数据
+    """
+    # 1. 获取所有数据
+    items = db.query(models.Item).all()
+    locations = db.query(models.Location).all()
+    inventory = db.query(models.Inventory).all()
+
+    # 2. 简单的转换函数 (把 SQLAlchemy 对象转成字典，方便看)
+    def to_dict(obj):
+        return {c.name: str(getattr(obj, c.name)) for c in obj.__table__.columns}
+
+    # 3. 组装结果
+    return {
+        "summary": {
+            "items_count": len(items),
+            "locations_count": len(locations),
+            "inventory_records": len(inventory),
+        },
+        "data": {
+            "items": [to_dict(i) for i in items],
+            "locations": [to_dict(l) for l in locations],
+            "inventory": [to_dict(inv) for inv in inventory],
+        },
+    }
+
+
+@app.get("/debug/relationship")
+def dump_relationships(db: Session = Depends(database.get_db)):
+    """
+    上帝视角：查看 [物品] --(库存)--> [位置] 的完整关系
+    """
+    # 联表查询：Item -> Inventory -> Location
+    results = (
+        db.query(
+            models.Item.name.label("item_name"),
+            models.Item.category,
+            models.Inventory.quantity,
+            models.Inventory.unit,
+            models.Location.name.label("location_name"),
+            models.Location.id.label("location_id"),
+        )
+        .join(models.Inventory, models.Inventory.item_id == models.Item.id)
+        .join(models.Location, models.Inventory.location_id == models.Location.id)
+        .all()
+    )
+
+    # 格式化输出
+    report = []
+    for row in results:
+        report.append(
+            {
+                "📦 物品": row.item_name,
+                "🏷️ 分类": row.category or "未分类",
+                "📊 数量": f"{float(row.quantity)} {row.unit}",
+                "📍 位置": f"{row.location_name} (ID: {row.location_id})",
+            }
+        )
+
+    return {"total_records": len(report), "inventory_report": report}
+
+
+# app/main.py (替换 dump_memories 函数)
+
+
+@app.get("/debug/memories")
+def dump_memories():
+    """
+    脑机接口：导出 Mem0 中的所有记忆 (Debug版)
+    """
+    try:
+        # 1. 获取所有记忆
+        all_memories = m.get_all(user_id="user_1")
+
+        # --- 🔍 调试打印 ---
+        print(f"🔍 DEBUG - Mem0 get_all 返回类型: {type(all_memories)}")
+        if isinstance(all_memories, list) and len(all_memories) > 0:
+            print(f"🔍 DEBUG - 第一条数据样例: {all_memories[0]}")
+        else:
+            print(f"🔍 DEBUG - 返回内容: {all_memories}")
+
+        # --- 🛠️ 兼容性处理 ---
+        # 如果返回的是字典（例如 {'results': [...]}），尝试取列表
+        if isinstance(all_memories, dict):
+            if "results" in all_memories:
+                all_memories = all_memories["results"]
+            elif "data" in all_memories:
+                all_memories = all_memories["data"]
+            else:
+                return {
+                    "warning": "Mem0 返回了字典，但无法识别结构",
+                    "raw_data": all_memories,
+                }
+
+        # 2. 格式化输出
+        formatted_list = []
+
+        for mem in all_memories:
+            # 情况 A: mem 是字典 (我们期望的)
+            if isinstance(mem, dict):
+                text = mem.get("memory") or mem.get("text") or "未知内容"
+                meta = mem.get("metadata", {})
+                mem_id = mem.get("id")
+            # 情况 B: mem 是字符串 (有时候 Mem0 只返回记忆文本)
+            elif isinstance(mem, str):
+                text = mem
+                meta = {}
+                mem_id = "unknown"
+            # 情况 C: 其他对象 (比如 Pydantic Model)
+            else:
+                # 尝试转成字典
+                try:
+                    mem = dict(mem)
+                    text = mem.get("memory", "未知")
+                    meta = mem.get("metadata", {})
+                    mem_id = mem.get("id")
+                except:
+                    text = str(mem)
+                    meta = {}
+                    mem_id = "unknown"
+
+            # 检查关联状态
+            item_id = meta.get("item_id") if isinstance(meta, dict) else None
+
+            if item_id:
+                link_status = f"🔗 已关联 (Item ID: {item_id})"
+            else:
+                link_status = "⚠️ 未关联"
+
+            formatted_list.append(
+                {
+                    "id": mem_id,
+                    "text": text,
+                    "link_status": link_status,
+                    "raw_metadata": meta,
+                }
+            )
+
+        return {"count": len(formatted_list), "memories": formatted_list}
+
+    except Exception as e:
+        import traceback
+
+        traceback.print_exc()  # 打印完整报错堆栈到终端
+        return {"error": f"无法获取记忆: {str(e)}"}

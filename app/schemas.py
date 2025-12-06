@@ -57,3 +57,20 @@ class Inventory(BaseModel):
 
     class Config:
         orm_mode = True
+
+
+# app/schemas.py (追加)
+
+
+# 递归模型：位置树节点
+class LocationNode(BaseModel):
+    id: int
+    name: str
+    children: List["LocationNode"] = []  # 包含子节点列表
+
+    class Config:
+        orm_mode = True
+
+
+# 这一行是必须的，用来更新 Pydantic 的递归引用
+LocationNode.update_forward_refs()

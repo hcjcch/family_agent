@@ -1,6 +1,6 @@
-# app/crud.py
 from sqlalchemy.orm import Session
 from . import models, schemas
+from decimal import Decimal
 
 
 # --- Location 操作 ---
@@ -58,7 +58,7 @@ def create_item_with_inventory(
 
     if db_inventory:
         # 如果有，增加数量
-        db_inventory.quantity += item_in.quantity
+        db_inventory.quantity += Decimal(str(item_in.quantity))
         # 更新单位（以最新的为准，可选）
         if item_in.unit:
             db_inventory.unit = item_in.unit
@@ -101,3 +101,78 @@ def get_or_create_location_by_name(db: Session, name: str, user_id: int = 1):
     db.commit()
     db.refresh(new_loc)
     return new_loc
+
+
+# app/crud.py (追加)
+
+
+def get_location_tree(db: Session, user_id: int = 1):
+    # 1. 取出该用户所有位置
+    all_locs = (
+        db.query(models.Location).filter(models.Location.user_id == user_id).all()
+    )
+
+    # 2. 构建 ID 到 Node 的映射字典
+    # 我们用 schemas.LocationNode 来包装数据，方便最后返回
+    nodes = {}
+    for loc in all_locs:
+        nodes[loc.id] = schemas.LocationNode(id=loc.id, name=loc.name, children=[])
+
+    # 3. 组装树结构
+    roots = []
+    for loc in all_locs:
+        node = nodes[loc.id]
+        if loc.parent_id is None:
+            # 没有父级，说明是根节点
+            roots.append(node)
+        else:
+            # 有父级，把自己挂到父级的 children 里
+            if loc.parent_id in nodes:
+                parent = nodes[loc.parent_id]
+                parent.children.append(node)
+
+    return roots
+
+
+def get_item_details(db: Session, item_id: int):
+    """
+    联表查询：获取物品详情 + 库存 + 位置名称
+    """
+    result = (
+        db.query(
+            models.Item.name,
+            models.Item.image_url,
+            models.Inventory.quantity,
+            models.Inventory.unit,
+            models.Location.name.label("location_name"),
+            models.Location.path,
+        )
+        .join(models.Inventory, models.Inventory.item_id == models.Item.id)
+        .join(models.Location, models.Inventory.location_id == models.Location.id)
+        .filter(models.Item.id == item_id)
+        .first()
+    )
+    return result
+
+
+# app/crud.py
+
+
+def get_item_all_inventories(db: Session, item_id: int):
+    """
+    查询某物品在所有位置的库存分布
+    返回：List of (quantity, unit, location_name, path)
+    """
+    results = (
+        db.query(
+            models.Inventory.quantity,
+            models.Inventory.unit,
+            models.Location.name.label("location_name"),
+            models.Location.path,
+        )
+        .join(models.Location, models.Inventory.location_id == models.Location.id)
+        .filter(models.Inventory.item_id == item_id)
+        .all()
+    )  # ✅ 改为 .all()，获取所有记录
+
+    return results

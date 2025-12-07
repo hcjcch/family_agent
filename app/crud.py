@@ -210,3 +210,66 @@ def get_all_inventory_details(db: Session):
             }
         )
     return data
+
+
+# 减少库存
+def reduce_inventory(db: Session, item_name: str, quantity: float, user_id: int = 1):
+    """
+    [核心逻辑] 消耗物品
+    策略：自动查找该物品的所有库存，优先扣减数量多的位置 (避免产生大量碎片库存)
+    """
+    # 1. 查找该物品的所有库存记录
+    # 联表查询：Inventory + Item
+    records = (
+        db.query(models.Inventory)
+        .join(models.Item, models.Inventory.item_id == models.Item.id)
+        .filter(models.Item.name == item_name, models.Item.user_id == user_id)
+        .order_by(models.Inventory.quantity.desc())  # 降序排列，先用多的
+        .all()
+    )
+
+    if not records:
+        return {"status": "error", "message": f"家里找不到'{item_name}'，无法消耗。"}
+
+    # 准备计算
+    needed = Decimal(str(quantity))
+    total_deducted = Decimal("0")
+    logs = []
+
+    # 2. 开始循环扣减
+    for inv in records:
+        if needed <= 0:
+            break
+
+        current_qty = inv.quantity
+
+        if current_qty >= needed:
+            # A. 当前位置够扣
+            inv.quantity -= needed
+            total_deducted += needed
+            logs.append(f"从位置(ID:{inv.location_id}) 扣除 {needed}")
+            needed = Decimal("0")  # 扣完了
+        else:
+            # B. 当前位置不够，全部扣光，继续下一个
+            deducted = current_qty
+            inv.quantity = Decimal("0")
+            total_deducted += deducted
+            needed -= deducted
+            logs.append(f"位置(ID:{inv.location_id}) 已用光({deducted})")
+
+    # 3. 提交事务
+    db.commit()
+
+    # 4. 生成返回消息
+    if needed > 0:
+        return {
+            "status": "warning",
+            "message": f"库存不足！只扣减了 {total_deducted}，还缺 {needed}。",
+            "details": logs,
+        }
+    else:
+        return {
+            "status": "success",
+            "message": f"成功消耗 {total_deducted} 个 {item_name}。",
+            "details": logs,
+        }

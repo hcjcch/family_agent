@@ -65,3 +65,43 @@ class Inventory(Base):
     __table_args__ = (
         UniqueConstraint("item_id", "location_id", name="uix_item_location"),
     )
+
+
+# app/models.py (追加)
+
+# 为了支持 UUID 和 Enum，需要额外引入
+import uuid
+from sqlalchemy.dialects.mysql import LONGTEXT
+
+
+class Session(Base):
+    __tablename__ = "sessions"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(Integer, nullable=False, default=1)
+    title = Column(String(100), nullable=True)
+    summary = Column(Text, nullable=True)  # 长期记忆的压缩摘要
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+    is_active = Column(Integer, default=1)  # 1=活跃, 0=归档
+
+    # 关系：一个会话有多条消息
+    messages = relationship(
+        "ChatMessage", back_populates="session", order_by="ChatMessage.created_at"
+    )
+
+
+class ChatMessage(Base):
+    __tablename__ = "chat_messages"
+
+    id = Column(Integer, primary_key=True, index=True)
+    session_id = Column(String(36), ForeignKey("sessions.id"), nullable=False)
+    role = Column(String(20), nullable=False)  # user, assistant, system, tool
+    content = Column(
+        LONGTEXT, nullable=True
+    )  # 内容可能很长，如果是工具调用可能包含 JSON
+    tool_call_id = Column(String(100), nullable=True)  # 专门存 OpenAI 的 tool_call_id
+    token_count = Column(Integer, default=0)  # 预留，未来做精细化控制
+    created_at = Column(DateTime, server_default=func.now())
+
+    session = relationship("Session", back_populates="messages")

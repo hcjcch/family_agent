@@ -9,6 +9,7 @@
         :root {
             --primary: #2563eb;
             --bg: #f1f5f9;
+            --header-height: 60px;
         }
 
         body {
@@ -18,6 +19,46 @@
             display: flex;
             flex-direction: column;
             height: 100vh;
+        }
+
+        /* 顶部导航栏 (新增) */
+        header {
+            height: var(--header-height);
+            background: white;
+            border-bottom: 1px solid #e2e8f0;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 20px;
+            box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+        }
+
+        h1 {
+            font-size: 18px;
+            margin: 0;
+            color: #1e293b;
+        }
+
+        /* 新对话按钮样式 */
+        .new-chat-btn {
+            background: white;
+            border: 1px solid #cbd5e1;
+            color: #475569;
+            padding: 6px 12px;
+            font-size: 14px;
+            border-radius: 6px;
+            /* 稍微方一点 */
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            transition: all 0.2s;
+        }
+
+        .new-chat-btn:hover {
+            background: #f8fafc;
+            border-color: var(--primary);
+            color: var(--primary);
         }
 
         /* 聊天区域 */
@@ -38,6 +79,8 @@
             line-height: 1.5;
             font-size: 15px;
             position: relative;
+            word-wrap: break-word;
+            /* 防止长单词溢出 */
         }
 
         .user {
@@ -73,7 +116,8 @@
             font-size: 16px;
         }
 
-        button {
+        /* 发送按钮 */
+        .send-btn {
             background: var(--primary);
             color: white;
             border: none;
@@ -83,7 +127,7 @@
             cursor: pointer;
         }
 
-        button:disabled {
+        .send-btn:disabled {
             background: #94a3b8;
         }
 
@@ -91,7 +135,8 @@
         .typing {
             font-size: 12px;
             color: #64748b;
-            margin-left: 10px;
+            margin-left: 20px;
+            margin-bottom: 5px;
             display: none;
         }
     </style>
@@ -99,18 +144,29 @@
 
 <body>
 
+    <!-- 顶部栏 -->
+    <header>
+        <h1>🏠 AI 家庭管家</h1>
+        <button onclick="resetSession()" class="new-chat-btn">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                stroke-linecap="round" stroke-linejoin="round">
+                <path d="M23 4v6h-6"></path>
+                <path d="M1 20v-6h6"></path>
+                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+            </svg>
+            开启新对话
+        </button>
+    </header>
+
     <div id="chat-container">
-        <!-- 欢迎语 -->
-        <div class="message bot">
-            👋 你好！我是你的家庭管家。
-            <br>你可以告诉我买了什么，或者问我东西在哪。
-        </div>
+        <!-- 欢迎语由 JS 动态添加，方便重置时调用 -->
     </div>
+
     <div class="typing" id="typing-indicator">管家正在思考...</div>
 
     <div id="input-area">
         <input type="text" id="msg-input" placeholder="输入消息..." onkeypress="handleKey(event)">
-        <button onclick="sendMessage()" id="send-btn">发送</button>
+        <button onclick="sendMessage()" class="send-btn" id="send-btn">发送</button>
     </div>
 
     <script>
@@ -119,6 +175,42 @@
         const input = document.getElementById('msg-input');
         const typing = document.getElementById('typing-indicator');
 
+        // 全局变量存储当前的 Session ID
+        let currentSessionId = '';
+
+        // 1. 初始化：页面加载时生成 ID 并显示欢迎语
+        window.onload = function () {
+            resetSession(false); // false 表示不需要弹窗确认
+        };
+
+        // 生成简单的 UUID
+        function generateUUID() {
+            return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
+                var r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
+                return v.toString(16);
+            });
+        }
+
+        // 2. 重置会话功能
+        function resetSession(confirmAction = true) {
+            if (confirmAction && !confirm("确定要开启新对话吗？当前聊天记录将被清除。")) {
+                return;
+            }
+
+            // 生成新的 Session ID (关键点：后端看到新ID就会当作新用户/新会话)
+            currentSessionId = generateUUID();
+            console.log("New Session ID:", currentSessionId);
+
+            // 清空 UI
+            chatBox.innerHTML = '';
+
+            // 添加欢迎语
+            const welcomeDiv = document.createElement('div');
+            welcomeDiv.className = 'message bot';
+            welcomeDiv.innerHTML = '👋 你好！我是你的家庭管家。<br>你可以告诉我买了什么，或者问我东西在哪。<br><small style="color:#94a3b8; font-size:12px;">(新会话已开启)</small>';
+            chatBox.appendChild(welcomeDiv);
+        }
+
         function handleKey(e) {
             if (e.key === 'Enter') sendMessage();
         }
@@ -126,7 +218,6 @@
         function appendMessage(text, role) {
             const div = document.createElement('div');
             div.className = `message ${role}`;
-            // 简单处理换行
             div.innerHTML = text.replace(/\n/g, '<br>');
             chatBox.appendChild(div);
             chatBox.scrollTop = chatBox.scrollHeight;
@@ -136,28 +227,29 @@
             const text = input.value.trim();
             if (!text) return;
 
-            // 1. 显示用户消息
             appendMessage(text, 'user');
             input.value = '';
 
-            // 2. 显示加载状态
             typing.style.display = 'block';
 
             try {
-                // 3. 调用后端 Chat 接口
+                // 3. 发送请求带上 session_id
                 const res = await fetch(`${API_BASE}/chat`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ message: text })
+                    body: JSON.stringify({
+                        message: text,
+                        session_id: currentSessionId // 传递 Session ID
+                    })
                 });
-                const data = await res.json();
 
-                // 4. 显示 AI 回复
+                const data = await res.json();
                 typing.style.display = 'none';
                 appendMessage(data.reply, 'bot');
 
             } catch (err) {
                 typing.style.display = 'none';
+                console.error(err);
                 appendMessage("❌ 连接因为网络问题中断了", 'bot');
             }
         }

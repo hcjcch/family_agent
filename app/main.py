@@ -415,83 +415,96 @@ class ChatInput(BaseModel):
 from app.core.tool_registry import registry
 from app.services.llm_service import chat as llm_engine
 import json
+from app.core.config import SYSTEM_PROMPT
+from app.services.chat_service import ChatService
 
-SYSTEM_PROMPT = """
-你是一个贴心、幽默、高效的 AI 家庭管家。
-你的职责是管理家庭库存、记忆物品位置，并像真人管家一样与用户对话。
 
-【工具使用规则】
-1. 根据用户意图，自主选择工具。
-2. **多任务处理**：如果用户一句话包含多个动作（例如"买了A放B，又买了C放D"），**必须在一次响应中生成多个 Tool Call**。
-3. **禁止废话**：在决定调用工具时，**不要生成任何普通的回复文本**。只输出 Tool Calls。等待工具执行完毕后，你再根据结果生成自然语言回复。
+# app/main.py
 
-【关于回答风格】
-当工具返回数据后，请遵守以下规则：
-1. **说人话**：将 JSON 数据转化为自然的口语，不要出现 JSON 格式或 Key-Value 对。
-2. **隐藏技术细节**：不要提及 ID、UUID、数据库字段名等技术术语。
-3. **语气亲切**：如果库存充足，可以让人放心；如果没了，提醒补货。
-4. **简洁明了**：直接回答核心问题，不要废话。
-
-例如：
-- ❌ 错误：根据数据库返回，Inventory item=apple quantity=5 location_id=2。
-- ✅ 正确：我查到了，冰箱里还有 5 个苹果。
-"""
+# ... (前面的 imports 保持不变) ...
+from app.services.chat_service import ChatService  # 确保引入了新服务
 
 
 @app.post("/chat")
 def chat_agent(chat: ChatInput, db: Session = Depends(database.get_db)):
     """
-    [Agent 模式] 这里的代码现在完全不知道 OpenAI 的存在
+    [Agent 模式] 真正的智能中枢 (带短期记忆 + 工具调用)
     """
     user_msg = chat.message
     print(f"👤 用户: {user_msg}")
 
-    # 构造上下文
-    context = {"db": db, "user_id": 1}
+    # --- 1. 初始化记忆服务 ---
+    # 假设单用户系统，user_id=1。多用户时从 Token 解析
+    chat_service = ChatService(db, user_id=1)
 
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": user_msg},
-    ]
+    # 获取当前会话 (Session)
+    session = chat_service.get_or_create_active_session()
 
-    # 获取工具 Schema
+    # 📝 记入用户消息 (Long-term DB Log)
+    chat_service.add_message(session.id, "user", user_msg)
+
+    # --- 2. 构建上下文 (Context Window) ---
+    # 从数据库拉取最近 10 条历史，并加上 System Prompt
+    messages = chat_service.get_context_messages(session.id, limit=10)
+
+    # 获取可用工具
     available_tools = registry.get_schemas()
 
-    print(f"🤖 可用工具: {[tool['function']['name'] for tool in available_tools]}")
+    # 构造执行上下文 (传给工具函数用)
+    tool_context = {"db": db, "user_id": 1}
 
-    # --- 1. 第一次思考 (调用封装好的 LLM) ---
-    # 以前: client.chat.completions.create(...)
-    # 现在: llm_engine.chat(...)
+    # --- 3. 第一轮调用 (Think) ---
     ai_msg = llm_engine(messages=messages, tools=available_tools)
 
-    # --- 2. 判断是否命中工具 ---
+    # --- 4. 判断是否命中工具 ---
     if ai_msg.tool_calls:
-        # 把 AI 的思考过程加进历史
+        # 📝 记入 AI 的思考/调用过程
+        # (可选) 为了节省数据库空间，且 tool_calls 结构复杂，
+        # 我们可以选择只在内存里保留这一步，或者将其序列化存入 content
+        # 这里演示：暂时不存入数据库，只在当前 RAM 上下文中追加，保证本轮对话连贯。
+        # 如果需要严格审计，需修改 add_message 支持存 tool_calls 字段。
         messages.append(ai_msg)
 
         for tool_call in ai_msg.tool_calls:
             func_name = tool_call.function.name
             args = json.loads(tool_call.function.arguments)
+            tool_call_id = tool_call.id
 
-            print(f"🤖 动态调用工具: {func_name}, args: {args}")
+            print(f"🤖 Agent 决定调用: {func_name} | 参数: {args}")
 
-            # 执行工具
-            tool_result = registry.execute(func_name, args, context)
+            # --- 5. 动态执行工具 (Act) ---
+            try:
+                tool_result = registry.execute(func_name, args, tool_context)
+            except Exception as e:
+                tool_result = {"error": str(e)}
 
-            # 填入结果
+            # 序列化结果
+            tool_result_str = json.dumps(tool_result, ensure_ascii=False, default=str)
+
+            # 📝 记入工具执行结果 (DB Log - 可选)
+            # 如果希望历史记录里包含工具结果，可以存。这里为了简洁，建议只存最终回复。
+            # chat_service.add_message(session.id, "tool", tool_result_str, tool_call_id=tool_call_id)
+
+            # 追加到当前上下文 (给 LLM 看)
             messages.append(
                 {
                     "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": json.dumps(tool_result, ensure_ascii=False, default=str),
+                    "tool_call_id": tool_call_id,
+                    "content": tool_result_str,
                 }
             )
 
-        # --- 3. 第二次思考 (生成人话) ---
-        # 再次调用封装工具，这次不需要传 tools 了（通常生成最终回复时不需要）
+        # --- 6. 第二轮调用 (Speak) ---
+        # LLM 看到工具结果后，生成最终回答
         final_msg = llm_engine(messages=messages)
-        return {"reply": final_msg.content}
+        final_reply = final_msg.content
 
     else:
-        # 纯闲聊
-        return {"reply": ai_msg.content}
+        # 没有调用工具，直接闲聊
+        final_reply = ai_msg.content
+
+    # 📝 记入 AI 最终回复 (Long-term DB Log)
+    # 这才是最重要的，下次加载历史时，用户看到的就是这句话
+    chat_service.add_message(session.id, "assistant", final_reply)
+
+    return {"reply": final_reply}

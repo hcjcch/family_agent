@@ -405,28 +405,29 @@ def dump_memories():
         return {"error": f"无法获取记忆: {str(e)}"}
 
 
-# app/main.py
-
-
-class ChatInput(BaseModel):
-    message: str
-
-
 from app.core.tool_registry import registry
 from app.services.llm_service import chat as llm_engine
 import json
 from app.core.config import SYSTEM_PROMPT
 from app.services.chat_service import ChatService
+import uuid
 
-
-# app/main.py
 
 # ... (前面的 imports 保持不变) ...
 from app.services.chat_service import ChatService  # 确保引入了新服务
 
 
+class ChatInput(BaseModel):
+    message: str
+    # 👇 新增：允许前端传 session_id
+    # 如果前端没传，后端可以自动生成一个新的，或者返回错误
+    session_id: Optional[str] = None
+
+
 @app.post("/chat")
 def chat_agent(chat: ChatInput, db: Session = Depends(database.get_db)):
+
+    current_session_id = chat.session_id or str(uuid.uuid4())
     """
     [Agent 模式] 真正的智能中枢 (带短期记忆 + 工具调用)
     """
@@ -438,7 +439,11 @@ def chat_agent(chat: ChatInput, db: Session = Depends(database.get_db)):
     chat_service = ChatService(db, user_id=1)
 
     # 获取当前会话 (Session)
-    session = chat_service.get_or_create_active_session()
+    session = chat_service.ensure_session(current_session_id)
+    if session.title == "新对话":
+        # 取用户消息的前 20 个字
+        new_title = user_msg
+        chat_service.update_session_title(session.id, new_title)
 
     # 📝 记入用户消息 (Long-term DB Log)
     chat_service.add_message(session.id, "user", user_msg)
@@ -507,4 +512,50 @@ def chat_agent(chat: ChatInput, db: Session = Depends(database.get_db)):
     # 这才是最重要的，下次加载历史时，用户看到的就是这句话
     chat_service.add_message(session.id, "assistant", final_reply)
 
-    return {"reply": final_reply}
+    return {"reply": final_reply, "session_id": current_session_id}
+
+
+# 1. 获取会话列表
+@app.get("/sessions")
+def list_user_sessions(db: Session = Depends(database.get_db)):
+    sessions = crud.get_user_sessions(db, user_id=1)
+    return [
+        {
+            "id": s.id,
+            "title": s.title or "新对话",  # 如果没有标题就显示默认
+            "date": s.updated_at.strftime("%m-%d %H:%M"),
+        }
+        for s in sessions
+    ]
+
+
+# 2. 获取单条会话历史
+@app.get("/sessions/{session_id}/history")
+def get_session_history(session_id: str, db: Session = Depends(database.get_db)):
+    msgs = crud.get_session_history(db, session_id)
+    # 过滤掉 system 消息，整理格式给前端
+    return [
+        {
+            "role": m.role,
+            "content": m.content,
+            # 如果是 tool 类型的消息，可能包含 JSON，前端决定是否展示
+        }
+        for m in msgs
+        if m.role != "system"  # 前端不需要看 system prompt
+    ]
+
+
+class RenameSessionInput(BaseModel):
+    title: str
+
+
+@app.put("/sessions/{session_id}/title")
+def rename_session(
+    session_id: str, input: RenameSessionInput, db: Session = Depends(database.get_db)
+):
+    """
+    手动重命名会话
+    """
+    chat_service = ChatService(db, user_id=1)
+    chat_service.update_session_title(session_id, input.title)
+    return {"status": "success", "new_title": input.title}

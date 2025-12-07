@@ -108,3 +108,46 @@ class ChatService:
         """
         # 这里可以调用 llm_engine 生成摘要
         pass
+
+    def ensure_session(self, session_id: str):
+        """
+        确保会话存在。如果不存在，就创建一个新的。
+        """
+        session = (
+            self.db.query(models.Session)
+            .filter(models.Session.id == session_id)
+            .first()
+        )
+
+        if not session:
+            # 创建新会话
+            session = models.Session(
+                id=session_id,  # 使用前端传来的 ID
+                user_id=self.user_id,
+                title="新对话",  # 后续可以用 LLM 自动生成标题 summary
+            )
+            self.db.add(session)
+            self.db.commit()
+            self.db.refresh(session)
+            print(f"🆕 创建新会话: {session_id}")
+
+        return session
+
+    def update_session_title(self, session_id: str, title: str):
+        """
+        更新会话标题
+        """
+        session = (
+            self.db.query(models.Session)
+            .filter(models.Session.id == session_id)
+            .first()
+        )
+        if session:
+            # 截取前 30 个字符，防止标题过长
+            clean_title = title.strip()[:30]
+            if len(title) > 30:
+                clean_title += "..."
+
+            session.title = clean_title
+            self.db.commit()
+            self.db.refresh(session)

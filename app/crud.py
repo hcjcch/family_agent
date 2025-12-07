@@ -273,3 +273,67 @@ def reduce_inventory(db: Session, item_name: str, quantity: float, user_id: int 
             "message": f"成功消耗 {total_deducted} 个 {item_name}。",
             "details": logs,
         }
+
+
+def update_recent_item_location(
+    db: Session, item_name: str, new_location_name: str, user_id: int = 1
+):
+    """
+    [上下文修正] 将某个物品移动到新位置
+    通常用于：用户补充位置信息，或者移动物品
+    """
+    # 1. 找到对应的 Location 对象 (没有就创建)
+    new_loc = get_or_create_location_by_name(db, new_location_name, user_id)
+
+    # 2. 找到该物品最近的一次库存记录
+    # 逻辑：按 updated_at 倒序找第一条
+    inventory = (
+        db.query(models.Inventory)
+        .join(models.Item)
+        .filter(models.Item.name == item_name, models.Item.user_id == user_id)
+        .order_by(models.Inventory.last_updated.desc())
+        .first()
+    )
+
+    if not inventory:
+        return {"status": "error", "message": f"找不到 {item_name}，无法移动。"}
+
+    # 3. 更新位置
+    old_loc_id = inventory.location_id
+    inventory.location_id = new_loc.id
+
+    # (可选优化) 如果新位置已经有该物品了，应该合并数量？
+    # V1 简单起见，直接改位置 ID。
+
+    db.commit()
+    db.refresh(inventory)
+
+    return {
+        "status": "success",
+        "message": f"已将 {item_name} 从旧位置移动到 {new_location_name}。",
+        "current_location": new_location_name,
+    }
+
+
+def get_user_sessions(db: Session, user_id: int = 1):
+    """
+    获取用户的所有会话列表 (按时间倒序)
+    """
+    return (
+        db.query(models.Session)
+        .filter(models.Session.user_id == user_id, models.Session.is_active == 1)
+        .order_by(models.Session.updated_at.desc())
+        .all()
+    )
+
+
+def get_session_history(db: Session, session_id: str):
+    """
+    获取某个会话的所有消息 (用于前端回显)
+    """
+    return (
+        db.query(models.ChatMessage)
+        .filter(models.ChatMessage.session_id == session_id)
+        .order_by(models.ChatMessage.id.asc())
+        .all()
+    )

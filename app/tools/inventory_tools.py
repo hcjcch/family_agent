@@ -60,3 +60,26 @@ def tool_consume(item_name: str, db: Session, quantity: float = 1, **kwargs):
         )
 
     return result
+
+
+# app/tools/inventory_tools.py (追加)
+
+
+@registry.register(
+    name="update_item_location",
+    description="【修正/移动】当用户想要修改已有物品的位置，或者补充说明刚才物品的位置时使用。例如：'把它放冰箱'、'移到书房'。",
+    parameters={
+        "type": "object",
+        "properties": {
+            "item_name": {
+                "type": "string",
+                "description": "物品名称 (如果用户说'它'，请根据对话历史推断名字)",
+            },
+            "new_location": {"type": "string", "description": "新的位置名称"},
+        },
+        "required": ["item_name", "new_location"],
+    },
+)
+def tool_update_location(item_name: str, new_location: str, db: Session, **kwargs):
+    print(f"🔧 移动物品: {item_name} -> {new_location}")
+    return crud.update_recent_item_location(db, item_name, new_location)

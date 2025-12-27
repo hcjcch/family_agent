@@ -2,27 +2,25 @@ services:
   backend:
     build: .
     container_name: butler_backend
+    restart: always
     ports:
       - "8000:8000"
-    volumes:
-      - ./app:/app/app
     depends_on:
       db:
-        condition: service_healthy # 👈 关键改动：必须等 db 健康了才启动
+        condition: service_healthy
       chromadb:
         condition: service_started
     environment:
       - DB_HOST=db
       - DB_USER=root
-      - DB_PASSWORD=rootpassword
+      - DB_PASSWORD=${DB_PASSWORD:-rootpassword}
       - DB_NAME=family_butler
       - CHROMA_HOST=chromadb
       - CHROMA_PORT=8000
-      # 确保 URL 正确，使用 pymysql 驱动
-      - DATABASE_URL=mysql+pymysql://root:rootpassword@db/family_butler
-      - OPENAI_API_KEY=sk-43129528cc2843a5b0297507c73af5b7
-      - OPENAI_BASE_URL=https://api.deepseek.com
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+      - DATABASE_URL=mysql+pymysql://root:${DB_PASSWORD:-rootpassword}@db/family_butler
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-https://api.deepseek.com}
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
 
   db:
     image: mysql:8.0

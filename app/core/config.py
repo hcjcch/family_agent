@@ -1,68 +1,20 @@
 # app/core/config.py
-import os
+"""
+应用配置模块
+使用统一的API配置管理，不再临时修改环境变量
+"""
+
 from mem0 import Memory
+from .api_config import APIConfigs
 
-# 获取 DeepSeek Key
-deepseek_api_key = os.getenv("OPENAI_API_KEY")
-deepseek_base_url = os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com")
-print(f"DeepSeek API Key: {deepseek_api_key}")
-print(f"DeepSeek Base URL: {deepseek_base_url}")
+# 获取Mem0配置（通过统一配置模块）
+config = APIConfigs.get_mem0_config()
 
-if not deepseek_api_key:
-    raise ValueError("⚠️ 未找到 OPENAI_API_KEY docker-compose.yml 配置")
-
-config = {
-    # 1. 向量存储 (保持不变: ChromaDB)
-    "vector_store": {
-        "provider": "chroma",
-        "config": {
-            "collection_name": "family_memories",
-            "host": os.getenv("CHROMA_HOST", "chromadb"),
-            "port": int(os.getenv("CHROMA_PORT", 8000)),
-        },
-    },
-    # 2. 嵌入模型 (保持不变: 本地 HuggingFace)
-    # 这样向量化是不花钱的，而且数据隐私更好
-    "embedder": {
-        "provider": "huggingface",
-        "config": {"model": "shibing624/text2vec-base-chinese"},
-    },
-    # 3. 大语言模型 (切换为: DeepSeek)
-    "llm": {
-        "provider": "deepseek",
-        "config": {
-            "model": "deepseek-chat",  # DeepSeek 的模型名称
-            "temperature": 0.1,  # 低温度让回答更严谨
-            "max_tokens": 1500,
-            "deepseek_base_url": deepseek_base_url,  # DeepSeek API 基础地址
-            "api_key": deepseek_api_key,  # DeepSeek API 密钥
-        },
-    },
-}
-
-print("正在初始化 Mem0 (DeepSeek + Local Chroma)...")
+print("正在初始化 Mem0 (DeepSeek LLM + 千问 Embedding + Chroma)...")
 m = Memory.from_config(config)
 print("Mem0 初始化完成！")
 
-
-# app/core/config.py (追加)
-
-# SYSTEM_PROMPT = """
-# 你是一个贴心、幽默、高效的 AI 家庭管家。
-# 你的职责是管理家庭库存、记忆物品位置，并像真人管家一样与用户对话。
-
-# 【关于工具使用】
-# 1. 根据用户意图，自主选择工具。
-# 2. 多任务处理：如果用户一句话包含多个动作，必须在一次响应中生成多个 Tool Call。
-# 3. 禁止废话：在决定调用工具时，只输出 Tool Calls，不要生成普通文本。
-
-# 【关于回答风格】
-# 当工具返回数据后，请遵守以下规则：
-# 1. 说人话：将 JSON 数据转化为自然的口语。
-# 2. 隐藏技术细节：不要提及 ID、UUID、数据库字段名。
-# 3. 语气亲切：如果库存充足，可以让人放心；如果没了，提醒补货。
-# """
-
+# ==================== System Prompt ====================
 SYSTEM_PROMPT = """
 你是一个贴心、幽默、高效的 AI 家庭管家。
 你的职责是管理家庭库存、记忆物品位置，并像真人管家一样与用户对话。

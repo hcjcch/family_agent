@@ -92,6 +92,7 @@ class APIConfigs:
                     "model": cls.QWEN.model,
                     "api_key": cls.QWEN.api_key,  # 显式传入千问的key
                     "openai_base_url": cls.QWEN.base_url,  # 千问的base URL
+                    "embedding_dims": 1024,  # 千问 text-embedding-v3 支持: 64, 128, 256, 512, 768, 1024
                 },
             },
             "llm": {

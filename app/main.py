@@ -480,11 +480,14 @@ def chat_agent(chat: ChatInput, db: Session = Depends(database.get_db)):
             # --- 5. 动态执行工具 (Act) ---
             try:
                 tool_result = registry.execute(func_name, args, tool_context)
+                print(f"✅ 工具执行成功: {func_name} -> {tool_result}")
             except Exception as e:
                 tool_result = {"error": str(e)}
+                print(f"❌ 工具执行失败: {func_name} -> {str(e)}")
 
             # 序列化结果
             tool_result_str = json.dumps(tool_result, ensure_ascii=False, default=str)
+            print(f"🔧 工具返回给LLM的JSON: {tool_result_str}")
 
             # 📝 记入工具执行结果 (DB Log - 可选)
             # 如果希望历史记录里包含工具结果，可以存。这里为了简洁，建议只存最终回复。
